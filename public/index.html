@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="A responsive AI chat application by Aaron Lee F. Angeles with SSE streaming, Markdown rendering, DOMPurify XSS protection, and syntax highlighting." />
+  <meta name="author" content="Aaron Lee F. Angeles" />
+  <title>Aaron AI Chat — Responsive AI Assistant</title>
+
+  <!--
+    CDN libraries (must load before app.js):
+    - Marked.js        → Markdown parsing
+    - Highlight.js     → Syntax highlighting (Atom One Dark theme)
+    - DOMPurify        → XSS sanitisation of rendered Markdown output
+  -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css"
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ===================== Sidebar ===================== -->
+    <header class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-dot">✦</span>
+        <h1 class="brand-title">Aaron AI</h1>
+      </div>
+
+      <button class="new-chat-btn" id="new-chat-btn" type="button" title="Start a new conversation">
+        <span class="btn-icon">✚</span>
+        <span class="btn-label">New Chat</span>
+      </button>
+
+      <nav class="chat-history" id="chat-history" aria-label="Conversation history">
+        <p class="history-empty" id="history-empty">No conversations yet.</p>
+      </nav>
+
+      <footer class="sidebar-footer">
+        <div class="model-pill" id="model-pill" title="Active model">
+          <span class="pulse-dot"></span>
+          <span id="model-name">…</span>
+        </div>
+        <p class="credit">
+          Crafted by <strong>Aaron Lee F. Angeles</strong>
+        </p>
+      </footer>
+    </header>
+
+    <!-- ===================== Main chat pane ===================== -->
+    <main class="chat-pane">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle sidebar">
+        ☰
+      </button>
+
+      <section class="messages" id="messages" aria-live="polite">
+        <!-- Welcome / empty state -->
+        <div class="welcome" id="welcome">
+          <div class="welcome-avatar">✦</div>
+          <h2>Hello, I'm Aaron AI</h2>
+          <p>
+            A lightweight, streaming AI chat interface. Ask me anything —
+            I'll answer with Markdown and beautifully highlighted code.
+          </p>
+          <div class="suggestions" id="suggestions">
+            <button class="suggestion" data-prompt="Explain how Server-Sent Events work with a simple diagram.">Explain SSE streaming</button>
+            <button class="suggestion" data-prompt="Write a JavaScript function to debounce a search input.">Debounce in JS</button>
+            <button class="suggestion" data-prompt="Give me a quick recipe for a creamy garlic pasta.">Quick pasta recipe</button>
+            <button class="suggestion" data-prompt="Summarize the key differences between var, let, and const.">var vs let vs const</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== Composer ===================== -->
+      <div class="composer-wrap" id="composer-wrap">
+        <div class="composer" id="composer">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Message Aaron AI…  (Enter to send, Shift+Enter for newline)"
+            autocomplete="off"
+            spellcheck="false"
+            inputmode="text"
+          ></textarea>
+
+          <!-- Stop Generating button — shown only while streaming -->
+          <button class="stop-btn" id="stop-btn" type="button" aria-label="Stop generating" title="Stop generating">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+            <span class="stop-label">Stop</span>
+          </button>
+
+          <button class="send-btn" id="send-btn" type="button" aria-label="Send message" disabled>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+              <path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+            </svg>
+          </button>
+        </div>
+        <p class="disclaimer">
+          Aaron AI can make mistakes. Verify important information.
+        </p>
+      </div>
+    </main>
+
+    <!-- Mobile sidebar overlay -->
+    <div class="overlay" id="overlay"></div>
+  </div>
+
+  <!--
+    Vendor libraries — must load before app.js so globals are set.
+    DOMPurify is placed after marked and hljs so the purify global
+    is available when renderMarkdown() runs on the first token.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

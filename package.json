@@ -1,0 +1,37 @@
+{
+  "name": "aaron-ai-chat",
+  "version": "1.0.0",
+  "description": "A lightweight, responsive AI chat application by Aaron Lee F. Angeles. Vanilla JS frontend, Express + OpenAI SDK backend with SSE streaming.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "lint": "eslint server.js public/app.js",
+    "lint:fix": "eslint --fix server.js public/app.js",
+    "pre-commit": "npm run lint && npm run test"
+  },
+  "keywords": [
+    "ai",
+    "chat",
+    "openai",
+    "sse",
+    "streaming",
+    "express",
+    "vanilla-js"
+  ],
+  "author": "Aaron Lee F. Angeles",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "8.7.0",
+    "helmet": "^7.1.0",
+    "openai": "^4.67.3"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
