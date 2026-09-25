@@ -456,6 +456,24 @@ describe('runtime — @vercel/node handler contract', () => {
     }
   });
 
+  it('has exactly one `module.exports =` assignment, and it assigns the app', () => {
+    // A later `module.exports = { ... }` anywhere below the export block
+    // would silently re-break the serverless deploy while every local path
+    // (npm start, Docker) kept working. Fail loudly and precisely.
+    const src = fs.readFileSync(SERVER_PATH, 'utf8');
+    const assignments = [...src.matchAll(/^module\.exports\s*=\s*(.+)$/gm)].map((m) => m[1].trim());
+    assert.strictEqual(
+      assignments.length,
+      1,
+      `expected exactly one \`module.exports =\` assignment, found ${assignments.length}: ${assignments.join(' | ')}`
+    );
+    assert.match(
+      assignments[0],
+      /^app;?$/,
+      `module.exports must be assigned the Express app, got: ${assignments[0]}`
+    );
+  });
+
   it('vercel.json points at the file that exports the handler', () => {
     const vercel = JSON.parse(fs.readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'));
     const entry = vercel.builds?.find((b) => b.use === '@vercel/node')?.src;

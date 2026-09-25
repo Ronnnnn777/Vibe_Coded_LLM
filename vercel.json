@@ -3,7 +3,14 @@
   "builds": [
     {
       "src": "server.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": "public/**"
+      }
+    },
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
@@ -14,6 +21,14 @@
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "X-Accel-Buffering": "no"
       }
+    },
+    {
+      "src": "/",
+      "dest": "/public/index.html"
+    },
+    {
+      "src": "/(.+\\.(?:html|htm|css|js|mjs|map|ico|png|jpe?g|gif|svg|webp|avif|woff2?|ttf|otf|txt|json|webmanifest))",
+      "dest": "/public/$1"
     },
     {
       "src": "/(.*)",

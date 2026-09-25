@@ -230,20 +230,71 @@ describe('toolchain versions agree across package.json, Docker and CI', () => {
 describe('vercel.json — kept working as a best-effort target', () => {
   const vercel = JSON.parse(read('vercel.json'));
 
+  /**
+   * Walk the route table the way Vercel does: first `src` whose anchored
+   * regex matches the path wins, with $1..$n substituted into `dest`.
+   */
+  function resolve(pathname) {
+    for (const route of vercel.routes) {
+      if (!route.src) continue;
+      const m = new RegExp(`^${route.src}$`).exec(pathname);
+      if (!m) continue;
+      const dest = String(route.dest).replace(/\$(\d+)/g, (_, i) => m[Number(i)] ?? '');
+      return { dest, route };
+    }
+    return { dest: null, route: null };
+  }
+
+  const servedByLambda = (p) => resolve(p).dest === '/server.js';
+
   it('builds server.js with @vercel/node', () => {
     assert.ok(vercel.builds?.some((b) => b.use === '@vercel/node'), '@vercel/node builder missing');
   });
 
-  it('routes /api/* and static requests through server.js', () => {
-    const api = vercel.routes?.find((r) => r.src === '/api/(.*)');
-    const statics = vercel.routes?.find((r) => r.src === '/(.*)');
-    assert.strictEqual(api?.dest, '/server.js', 'API route should target /server.js');
-    assert.strictEqual(statics?.dest, '/server.js', 'static catch-all should target /server.js');
+  it('builds public/ as static output', () => {
+    assert.ok(
+      vercel.builds?.some((b) => b.use === '@vercel/static' && b.src.startsWith('public/')),
+      'public/ should be built as static output, not served from the function'
+    );
+  });
+
+  it('routes /api/* through the function', () => {
+    for (const p of ['/api/chat', '/api/health', '/api/ready']) {
+      assert.ok(servedByLambda(p), `${p} should be handled by server.js`);
+    }
   });
 
   it('disables proxy buffering and caching on API routes so SSE can stream', () => {
-    const api = vercel.routes?.find((r) => r.src === '/api/(.*)');
+    const api = resolve('/api/chat').route;
     assert.strictEqual(api?.headers?.['X-Accel-Buffering'], 'no', 'X-Accel-Buffering: no missing');
     assert.match(api?.headers?.['Cache-Control'] || '', /no-store/, 'Cache-Control should include no-store');
   });
+
+  it('serves every file in public/ from the CDN, not the function', () => {
+    // Previously the catch-all sent index.html, style.css and app.js through
+    // the lambda: a function invocation (and possible cold start) per asset,
+    // on every page load.
+    const files = fs.readdirSync(path.join(ROOT, 'public'));
+    assert.ok(files.length > 0, 'public/ is empty?');
+    for (const file of files) {
+      const { dest } = resolve(`/${file}`);
+      assert.strictEqual(
+        dest,
+        `/public/${file}`,
+        `/${file} should resolve to the static build, got ${dest} — add its extension to the asset route`
+      );
+    }
+  });
+
+  it('serves / from the static index.html', () => {
+    assert.strictEqual(resolve('/').dest, '/public/index.html');
+    assert.ok(!servedByLambda('/'), 'the landing page should not cost a function invocation');
+  });
+
+  it('falls back to the function for unknown paths', () => {
+    for (const p of ['/some/deep/path', '/whatever']) {
+      assert.ok(servedByLambda(p), `${p} should fall through to server.js`);
+    }
+  });
 });
+

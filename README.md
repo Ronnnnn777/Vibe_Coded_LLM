@@ -257,6 +257,19 @@ vercel env add OPENAI_API_KEY      # then OPENAI_BASE_URL, OPENAI_MODEL, APP_URL
 vercel --prod
 ```
 
+**Routing.** `public/**` is built as static output and served from the CDN;
+only `/api/*` and unmatched paths reach the function. Before this, the
+catch-all sent `index.html`, `style.css` and `app.js` through the lambda —
+a function invocation, and a possible cold start, for every asset on every
+page load. The node build keeps `includeFiles: "public/**"` so the fallback
+route can still serve the UI. `tests/config.test.js` replays the route table
+and fails if any file in `public/` starts resolving to the function again.
+
+**Verify before trusting it.** Nothing local exercises the serverless path —
+`npm start` and Docker both go through `require.main === module`. Run
+`vercel dev`, which uses the same bridge, to catch handler/export and routing
+problems without deploying.
+
 `@vercel/node` requires the entrypoint in `vercel.json` (`server.js`) to
 export a **callable** request handler — an object export fails at runtime
 with *"the default export is not a function"*, and `npm start` would not
