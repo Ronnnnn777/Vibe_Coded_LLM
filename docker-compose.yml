@@ -1,0 +1,37 @@
+# Local parity with the container hosts (Fly / Render / Railway).
+#
+#   cp .env.example .env   # then fill in OPENAI_API_KEY
+#   docker compose up --build
+#
+# There is no database service: the server is stateless and conversation
+# history lives in the browser's localStorage.
+
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: aaron-ai-chat:local
+    ports:
+      - '${PORT:-3000}:3000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+    # Reap zombies and forward signals the same way most platforms do.
+    init: true
+    # Give in-flight SSE streams time to drain before SIGKILL.
+    stop_grace_period: 15s
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3

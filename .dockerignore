@@ -1,0 +1,29 @@
+# Secrets — must never enter the build context or an image layer
+.env
+.env.*
+!.env.example
+
+# Dependencies are installed inside the image from the lockfile
+node_modules/
+
+# VCS + CI
+.git/
+.github/
+.gitignore
+
+# Tests and tooling (not needed at runtime)
+tests/
+eslint.config.js
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Platform/editor cruft
+.vercel/
+vercel.json
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+coverage/
+README.md

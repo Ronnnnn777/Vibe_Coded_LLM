@@ -33,7 +33,21 @@ const { OpenAI } = require('openai');
  *  Configuration
  * ---------------------------------------------------------- */
 const PORT = Number(process.env.PORT) || 3000;
+// Bind all interfaces by default: inside a container, 127.0.0.1 is only
+// reachable from within the container itself and the platform health check
+// would never connect.
+const HOST = process.env.HOST || '0.0.0.0';
 const APP_URL = process.env.APP_URL || '';
+
+// How long to let in-flight SSE streams drain on SIGTERM before forcing exit.
+// Container platforms send SIGKILL after their own grace period (Fly ~5s
+// default, Render 30s), so finish first and exit on our own terms.
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS) || 10_000;
+
+// Interval for SSE keep-alive comments. Proxies in front of a container
+// (Fly, Render, nginx) close idle connections; a comment line keeps the
+// socket warm while the upstream model is still thinking.
+const SSE_HEARTBEAT_MS = 15_000;
 
 // Optional shared secret for API authentication.
 // If set, the browser must send it as the `x-shared-secret` header
@@ -89,6 +103,11 @@ app.use(express.json({ limit: '1mb' }));
 // Limits each IP to 20 chat requests per 60 seconds.
 // This prevents a malicious visitor from draining your Dahl API credits
 // by hammering the endpoint. Returns HTTP 429 with a friendly message.
+//
+// NOTE: this uses the default in-memory store, so the counter is per
+// process. Running more than one container/replica multiplies the real
+// limit by the replica count. Move to a shared store (Redis) if you scale
+// horizontally — see README "Scaling notes".
 const chatLimiter = rateLimit({
   windowMs: 60 * 1000,        // 1 minute
   max: 20,                    // 20 requests per window per IP
@@ -187,8 +206,35 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.setHeader('Content-Encoding', 'identity');
 
+  // Flush headers NOW — before validation and before the upstream call.
+  // Previously this happened only after the model stream had opened, so the
+  // browser waited out time-to-first-token plus up to ~7.5s of 429 backoff
+  // with nothing on the wire, which proxies treat as an idle connection.
+  res.flushHeaders();
+
+  // Keep-alive comments. `: ping` lines are ignored by SSE parsers but stop
+  // proxies (Fly, Render, nginx) from dropping a stream that is still waiting
+  // on the model.
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n');
+  }, SSE_HEARTBEAT_MS);
+  if (typeof heartbeat.unref === 'function') heartbeat.unref();
+
+  // Single exit path: stops the heartbeat and closes the response exactly
+  // once, no matter which branch we leave through.
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    clearInterval(heartbeat);
+    try {
+      if (!res.writableEnded) res.end();
+    } catch (_) { /* already closed */ }
+  };
+
   // Helper to emit a named SSE event.
   const send = (event, data) => {
+    if (res.writableEnded) return;
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
@@ -197,7 +243,7 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
 
   if (!Array.isArray(messages) || messages.length === 0) {
     send('error', { message: 'Invalid request: messages array is required.' });
-    res.end();
+    finish();
     return;
   }
 
@@ -216,12 +262,10 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
   // Dahl's Gonka network rejects the AbortController `signal` parameter,
   // so we cannot cancel in-flight GPU work. We detect client disconnects
   // via req.on('close') and close the SSE response early.
-  let streamEndedCleanly = false;
-
   req.on('close', () => {
-    if (!streamEndedCleanly) {
+    if (!finished) {
       console.log('[info] Client disconnected mid-stream');
-      try { res.end(); } catch (_) { /* already closed */ }
+      finish();
     }
   });
 
@@ -229,10 +273,11 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
   // Tries up to MAX_RETRIES times with exponential backoff.
   const MAX_RETRIES = 2;
   let lastErr = null;
+  let stream = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      var stream = await openai.chat.completions.create({
+      stream = await openai.chat.completions.create({
         model: MODEL,
         messages: payloadMessages,
         temperature,
@@ -270,7 +315,7 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
 
       console.error(`[error] Stream failed (attempt ${attempt + 1}, ${status || 'unknown'}): ${err.message}`);
       send('error', { message: userMessage });
-      res.end();
+      finish();
       return;
     }
   }
@@ -278,12 +323,9 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
   // If all retries failed, lastErr is set — handle it above, so we never reach here.
   if (lastErr) {
     send('error', { message: 'The model is unavailable. Please try again.' });
-    res.end();
+    finish();
     return;
   }
-
-  // Flush headers NOW so Vercel opens the connection before any token arrives.
-  res.flushHeaders();
 
   try {
     for await (const chunk of stream) {
@@ -294,19 +336,13 @@ app.post('/api/chat', chatLimiter, requireApiKey, async (req, res) => {
       }
     }
     send('done', {});
-    res.end();
   } catch (err) {
-    if (err.name === 'AbortError') {
-      try { res.end(); } catch (_) { /* already closed */ }
-      return;
-    }
-    console.error('[error] Stream interrupted:', err.message);
-    try {
+    if (err.name !== 'AbortError') {
+      console.error('[error] Stream interrupted:', err.message);
       send('error', { message: `Stream interrupted: ${err.message}` });
-      res.end();
-    } catch (_) { /* already closed */ }
+    }
   } finally {
-    streamEndedCleanly = true;
+    finish();
   }
 });
 
@@ -325,10 +361,10 @@ app.use('/api', (_req, res) => {
  * ---------------------------------------------------------- */
 const server = http.createServer(app);
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log('============================================================');
   console.log('  Aaron AI Chat — Dahl Inference');
-  console.log(`  ➜  Local:   http://localhost:${PORT}`);
+  console.log(`  ➜  Local:   http://localhost:${PORT}  (bound to ${HOST}:${PORT})`);
   console.log(`  ➜  Model:   ${MODEL}`);
   console.log('  ➜  Provider:', process.env.OPENAI_BASE_URL || 'https://inference.dahl.global/v1');
   console.log('  ➜  Helmet security headers:  enabled');
@@ -338,13 +374,27 @@ server.listen(PORT, () => {
   console.log('============================================================');
 });
 
-const shutdown = () => {
-  console.log('\n[info] Shutting down gracefully...');
+let shuttingDown = false;
+
+const shutdown = (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[info] ${signal || 'signal'} received — shutting down gracefully...`);
+
+  // Stop accepting new connections, let in-flight SSE streams drain.
   server.close(() => {
     console.log('[info] Server closed.');
     process.exit(0);
   });
+
+  // An open SSE stream would otherwise hold server.close() forever and the
+  // platform would SIGKILL us mid-request. Exit on our own terms first.
+  const force = setTimeout(() => {
+    console.warn(`[warn] Forcing exit after ${SHUTDOWN_TIMEOUT_MS}ms with connections still open.`);
+    process.exit(0);
+  }, SHUTDOWN_TIMEOUT_MS);
+  force.unref();
 };
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

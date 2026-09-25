@@ -12,6 +12,7 @@
 - **Syntax highlighting** — code blocks are highlighted with highlight.js (Atom One Dark theme)
 - **Responsive design** — sidebar collapses to a slide-in drawer on mobile (≤ 860 px)
 - **API key security** — the key is loaded by `dotenv` on the server only and is never exposed to the browser
+- **Container-ready** — multi-stage Docker image, non-root, healthcheck, graceful `SIGTERM` drain
 
 ---
 
@@ -19,15 +20,22 @@
 
 ```
 .
-├── .env.example       ← copy to .env and fill in your API key
-├── .gitignore         ← .env and node_modules are ignored
+├── .env.example        ← copy to .env and fill in your API key
+├── .dockerignore       ← keeps .env and tests out of the build context
+├── .gitignore          ← .env and node_modules are ignored
+├── Dockerfile          ← multi-stage production image (non-root, healthcheck)
+├── docker-compose.yml  ← local parity with the container hosts
+├── eslint.config.js    ← ESLint 9 flat config
 ├── package.json
-├── server.js          ← Express + OpenAI SDK + SSE streaming backend
-├── vercel.json        ← Vercel deployment configuration
-└── public/
-    ├── index.html     ← SPA shell + CDN library imports
-    ├── style.css      ← responsive dark theme
-    └── app.js         ← streaming client, session memory, Marked + hljs
+├── server.js           ← Express + OpenAI SDK + SSE streaming backend
+├── vercel.json         ← legacy Vercel config (see Deployment)
+├── public/
+│   ├── index.html      ← SPA shell + CDN library imports
+│   ├── style.css       ← responsive dark theme
+│   └── app.js          ← streaming client, session memory, Marked + hljs
+└── tests/
+    ├── server.test.js      ← static structure / config assertions
+    └── integration.test.js ← boots the server against a stub upstream
 ```
 
 ---
@@ -71,65 +79,119 @@ npm run dev
 
 ---
 
-## Beta Deployment (Render / Railway)
+## Docker
 
-Both platforms offer a free tier and support Node.js apps with environment variables.
+The image is the deployment artifact for every target below. There is no
+frontend build step — the container just serves `public/` and runs Express.
 
-### Option A — Render (recommended for SSE)
+```bash
+# Build and run directly
+docker build -t aaron-ai-chat .
+docker run --rm --init -p 3000:3000 --env-file .env aaron-ai-chat
 
-1. Create a new **Web Service** on Render.
-2. Connect your GitHub repository.
-3. Configure the build:
+# …or with Compose (rebuilds on change)
+docker compose up --build
+```
 
-   | Setting | Value |
-   |---|---|
-   | **Build Command** | `npm install` |
-   | **Start Command** | `npm start` |
+Details worth knowing:
 
-4. Add environment variables in the Render dashboard:
-
-   | Key | Value |
-   |---|---|
-   | `EXPLABS_API_KEY` | `sk-your-experiential-key` |
-   | `EXPLABS_BASE_URL` | `https://api.experientiallabs.ai/v1` |
-   | `EXPLABS_MODEL` | `claude-fable-5.1` |
-
-5. Deploy. Your app will be live at `https://your-app.onrender.com`.
-
-> **SSE note for Render:** Add a `Cache-Control: no-cache` response header in your Render settings to prevent the proxy from buffering SSE responses. The `vercel.json` already handles this for Vercel deployments.
-
-### Option B — Railway
-
-1. Create a new Railway project and connect your GitHub repo.
-2. Add the same environment variables from the table above via the Railway dashboard.
-3. Railway auto-detects the `package.json` start script — deploy.
+- **Non-root.** The runtime stage drops to the built-in `node` user.
+- **Healthcheck built in.** Docker polls `/api/health`; orchestrators and
+  load balancers should point at the same endpoint.
+- **`HOST=0.0.0.0` by default.** Binding `127.0.0.1` inside a container makes
+  the app unreachable from outside it — the most common "works locally,
+  dead in prod" failure for this kind of app.
+- **Graceful stop.** `SIGTERM` drains in-flight SSE streams, then the process
+  exits on its own after `SHUTDOWN_TIMEOUT_MS` (default 10s) rather than
+  waiting to be `SIGKILL`ed mid-response.
+- **Dev tooling is excluded.** `.dockerignore` keeps `.env`, `tests/` and
+  `.git/` out of the build context; CI asserts none of them reach the image.
 
 ---
 
-## Vercel Deployment
+## Deployment
 
-Vercel requires a custom `vercel.json` (included in this project) to route API calls to the Express server and to disable response buffering for SSE.
+Required environment variables on every platform:
+
+| Key | Value |
+|---|---|
+| `OPENAI_API_KEY` | your Dahl Inference key (**secret**) |
+| `OPENAI_BASE_URL` | `https://inference.dahl.global/v1` |
+| `OPENAI_MODEL` | `deepseek-ai/DeepSeek-V4-Flash-0731` |
+| `APP_URL` | your public URL, e.g. `https://chat.example.com` (locks down CORS/CSP) |
+| `SHARED_SECRET` | optional — requires an `x-shared-secret` header on `/api/chat` |
+
+`HOST` and `PORT` are set by the image; most platforms inject their own
+`PORT`, which the server honours.
+
+### Fly.io
 
 ```bash
-# 1. Install the Vercel CLI globally
-npm i -g vercel
-
-# 2. Login
-vercel login
-
-# 3. Link your project
-vercel link
-
-# 4. Add environment variables (do NOT commit .env)
-vercel env add EXPLABS_API_KEY
-vercel env add EXPLABS_BASE_URL
-vercel env add EXPLABS_MODEL
-
-# 5. Deploy
-vercel --prod
+fly launch --no-deploy            # detects the Dockerfile
+fly secrets set OPENAI_API_KEY=sk-...
+fly deploy
 ```
 
-Your production URL will be returned after deployment completes.
+In `fly.toml`, keep `auto_stop_machines` off (or accept a cold start on the
+first message) and set `[http_service] internal_port = 3000`.
+
+### Render
+
+Create a **Web Service** → **Docker** runtime pointed at this repo. Render
+reads the `Dockerfile` and the `HEALTHCHECK`; set the health check path to
+`/api/health` and add the environment variables above. No build or start
+command is needed — the image defines both.
+
+### Railway
+
+`railway up` (or connect the repo). Railway detects the `Dockerfile`
+automatically. Add the environment variables in the dashboard.
+
+### Legacy: Vercel
+
+`vercel.json` is kept for the existing deployment, but serverless is a poor
+fit for this app: functions have a hard maximum duration, and every response
+is a long-lived SSE stream. A container host is recommended instead. Note
+that `@vercel/node` **ignores the `Dockerfile`** — the two deployment paths
+share no build logic.
+
+---
+
+## Testing & CI
+
+```bash
+npm test               # unit + integration
+npm run test:unit      # static structure assertions only
+npm run test:integration
+npm run lint
+```
+
+`tests/integration.test.js` boots `server.js` as a real child process against
+a stub OpenAI-compatible upstream on localhost, so it exercises the actual
+SSE wire format with **no network calls, no API key and no GPU spend**. It
+exists because the original suite asserted on the *text* of `server.js` and
+therefore passed while the client called an undefined variable and parsed a
+message shape the server never sent.
+
+GitHub Actions runs four jobs on every push and pull request: tests on Node
+20/22/24, ESLint, a Docker build plus a container smoke test (health, static
+route, SSE headers, clean `SIGTERM` exit, non-root, no secrets in the image),
+and a dependency/secret audit.
+
+---
+
+## Scaling notes
+
+The server is stateless — conversation history lives in the browser's
+`localStorage`, so there is no database and any instance can serve any
+request. Two caveats before adding replicas:
+
+- **Rate limiting is per process.** `express-rate-limit` uses its in-memory
+  store, so N replicas allow N × 20 requests/minute per IP. Move to a shared
+  store (Redis) if you scale out.
+- **Sticky sessions are not required**, but a proxy that buffers responses
+  will break streaming. The server sets `X-Accel-Buffering: no` and sends
+  `: ping` keep-alives every 15s; make sure your platform honours them.
 
 ---
 
@@ -145,6 +207,12 @@ Your production URL will be returned after deployment completes.
 | Frontend | Vanilla JavaScript (ES2022), HTML5, CSS3 |
 | Markdown | Marked.js (CDN) |
 | Syntax highlighting | Highlight.js v11.9 (CDN, Atom One Dark) |
+| Sanitisation | DOMPurify (CDN) |
+| Container | Docker (multi-stage, `node:22-alpine`, non-root) |
+| Tests | Node built-in test runner (`node --test`) |
+| Lint | ESLint 9 (flat config) |
+| CI | GitHub Actions — test matrix, lint, Docker smoke test, audit |
+| Database | none — stateless server, history in `localStorage` |
 
 ---
 

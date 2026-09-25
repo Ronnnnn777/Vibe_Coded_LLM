@@ -347,7 +347,7 @@
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ messages: hist }),
-        signal:  streamAbortControllerController.signal,
+        signal:  streamAbortController.signal,
       });
 
       if (!response.ok) {
@@ -362,6 +362,18 @@
 
       userScrolledUp = false;
 
+      /* The server emits NAMED SSE events (see server.js `send()`):
+       *     event: delta   data: {"token":"..."}
+       *     event: done    data: {}
+       *     event: error   data: {"message":"..."}
+       * plus `: ping` keep-alive comments. Earlier this loop tried to read
+       * raw OpenAI chunks (parsed.choices[0].delta.content), which this
+       * wire format never contains — so no token ever rendered.
+       * `currentEvent` lives outside the read loop because an `event:` line
+       * and its `data:` line can land in different network chunks. */
+      var currentEvent = 'message';
+
+      streamLoop:
       while (true) {
         var _ref = await reader.read();
         var done  = _ref.done;
@@ -373,19 +385,35 @@
         remainder = lines.pop() || '';
 
         for (var _n = 0, _lines = lines; _n < _lines.length; _n++) {
-          var line = _lines[_n];
+          var line = _lines[_n].replace(/\r$/, '');
+
+          if (line.startsWith(':')) continue;               // keep-alive comment
+
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+
           if (!line.startsWith('data: ')) continue;
           var data = line.slice(6).trim();
-          if (data === '[DONE]') break;
+          if (data === '[DONE]') break streamLoop;
 
           var parsed;
           try { parsed = JSON.parse(data); } catch (_) { continue; }
 
-          if (parsed.error) throw new Error(parsed.error);
+          if (currentEvent === 'error' || parsed.error) {
+            throw new Error(parsed.message || parsed.error || 'Unknown stream error');
+          }
 
-          var token = parsed.choices && parsed.choices[0] && parsed.choices[0].delta
-            ? parsed.choices[0].delta.content
-            : null;
+          if (currentEvent === 'done') break streamLoop;
+
+          // Server format first, raw OpenAI shape kept as a fallback so the
+          // client still works if pointed straight at an upstream provider.
+          var token = typeof parsed.token === 'string'
+            ? parsed.token
+            : (parsed.choices && parsed.choices[0] && parsed.choices[0].delta
+              ? parsed.choices[0].delta.content
+              : null);
           if (!token) continue;
 
           fullText += token;

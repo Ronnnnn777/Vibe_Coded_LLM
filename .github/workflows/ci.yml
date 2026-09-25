@@ -2,17 +2,26 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'arena/**']
   pull_request:
-    branches: [main, master]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref instead of paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  # ── Job 1: Server-side unit tests ──────────────────────────
+  # ── Job 1: unit + integration tests ────────────────────────
   test:
     name: Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         node-version: ['20', '22', '24']
 
@@ -24,44 +33,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      # Validates .env.example is present and has no blank values.
+      - name: Verify required files exist
+        run: |
+          set -euo pipefail
+          for f in server.js package.json package-lock.json .env.example .gitignore \
+                   .dockerignore Dockerfile eslint.config.js README.md \
+                   public/index.html public/style.css public/app.js; do
+            [ -f "$f" ] || { echo "MISSING: $f"; exit 1; }
+            echo "  ✓ $f"
+          done
+
       - name: Validate env template
         run: |
-          set -e
-          grep -v '^#' .env.example | grep -v '^$' | wc -l
-          # Must have at least 4 non-empty, non-comment lines
-          count=$(grep -v '^#' .env.example | grep -v '^$' | wc -l)
-          if [ "$count" -lt 4 ]; then
-            echo "ERROR: .env.example is incomplete"
-            exit 1
-          fi
-          echo "✓ .env.example has $count config entries"
+          set -euo pipefail
+          count=$(grep -cvE '^\s*(#|$)' .env.example)
+          [ "$count" -ge 4 ] || { echo "ERROR: .env.example is incomplete"; exit 1; }
+          for key in OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL PORT HOST; do
+            grep -q "^${key}=" .env.example || { echo "ERROR: $key missing from .env.example"; exit 1; }
+          done
+          echo "✓ .env.example documents $count settings"
 
-      # Syntax and require-graph check (Node parses without executing).
-      - name: Lint server.js (Node syntax + dependency check)
-        run: node --check server.js && echo "✓ server.js syntax OK"
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check public/app.js
+          echo "✓ syntax OK"
 
-      # Run server unit tests using Node's built-in test runner.
-      - name: Run unit tests
+      # Unit tests assert on source text; integration tests boot the real
+      # server against a stub upstream on localhost (no network, no API key).
+      - name: Run tests
         run: npm test
-        env:
-          # Use a clearly-invalid key so the placeholder guard fires in tests
-          # that check error paths (validates the guard is wired correctly).
-          OPENAI_API_KEY: 'sk-test-guard-key'
-          OPENAI_BASE_URL: 'https://inference.dahl.global/v1'
-          OPENAI_MODEL: 'deepseek-ai/DeepSeek-V4-Flash-0731'
 
-  # ── Job 2: Static-analysis lint ────────────────────────────
+  # ── Job 2: lint ────────────────────────────────────────────
   lint:
     name: Lint (ESLint)
     runs-on: ubuntu-latest
@@ -74,95 +82,120 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
 
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-lint-${{ hashFiles('package-lock.json') }}
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Install ESLint
-        run: npm install --no-save eslint
-
+      # Fails on any error and on warning growth past the cap in the
+      # `lint` script. Previously this step ended in `|| true` and used a
+      # config ESLint 9 ignores, so it could never fail.
       - name: Run ESLint
-        run: |
-          npx eslint server.js public/app.js || true
-          echo "Note: ESLint warnings are non-fatal in CI (see .eslintrc.js for rules)"
+        run: npm run lint
 
-  # ── Job 3: Vercel build simulation ─────────────────────────
-  build:
-    name: Build (Vercel simulation)
+  # ── Job 3: Docker image build + container smoke test ───────
+  docker:
+    name: Docker (build + smoke test)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
         with:
-          node-version: '22'
+          context: .
+          load: true
+          tags: aaron-ai-chat:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify all required files exist
+      - name: Image runs as a non-root user
         run: |
-          set -e
-          echo "Checking required files..."
-          for f in server.js package.json .env.example .gitignore vercel.json README.md public/index.html public/style.css public/app.js; do
-            if [ ! -f "$f" ]; then
-              echo "MISSING: $f"
-              exit 1
-            fi
-            echo "  ✓ $f"
+          set -euo pipefail
+          uid=$(docker run --rm aaron-ai-chat:ci id -u)
+          [ "$uid" != "0" ] || { echo "ERROR: container runs as root"; exit 1; }
+          echo "✓ running as uid $uid"
+
+      - name: No secrets or dev tooling baked into the image
+        run: |
+          set -euo pipefail
+          docker run --rm aaron-ai-chat:ci sh -c '
+            for bad in /app/.env /app/tests /app/.git /app/eslint.config.js; do
+              if [ -e "$bad" ]; then echo "LEAKED INTO IMAGE: $bad"; exit 1; fi
+            done
+            echo "✓ image contains no secrets or test tooling"
+          '
+
+      - name: Start container
+        run: |
+          docker run -d --name chat-smoke -p 3000:3000 \
+            -e OPENAI_API_KEY=sk-ci-smoke-key \
+            -e OPENAI_MODEL=ci-model \
+            aaron-ai-chat:ci
+
+      - name: Wait for the built-in HEALTHCHECK to report healthy
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' chat-smoke)
+            echo "  health: $status"
+            [ "$status" = "healthy" ] && exit 0
+            [ "$status" = "unhealthy" ] && { docker logs chat-smoke; exit 1; }
+            sleep 2
           done
+          echo "ERROR: container never became healthy"
+          docker logs chat-smoke
+          exit 1
 
-      - name: Validate vercel.json schema
+      - name: Smoke test the running container
         run: |
-          set -e
-          node -e "
-            const v = require('./vercel.json');
-            const errors = [];
-            if (!v.builds || !Array.isArray(v.builds)) errors.push('missing builds array');
-            if (!v.routes || !Array.isArray(v.routes)) errors.push('missing routes array');
-            if (!v.routes.find(r => r.src === '/api/(.*)')) errors.push('missing /api route');
-            if (!v.routes.find(r => r.src === '/(.*)')) errors.push('missing static route');
-            if (errors.length) { console.error('vercel.json errors:', errors); process.exit(1); }
-            console.log('✓ vercel.json schema valid');
-            console.log('  builds:', JSON.stringify(v.builds));
-            console.log('  routes:', v.routes.length, 'defined');
-            const apiRoute = v.routes.find(r => r.src === '/api/(.*)');
-            console.log('  SSE headers:', JSON.stringify(apiRoute.headers));
-          "
+          set -euo pipefail
 
-      - name: Verify Express static middleware path
+          health=$(curl -fsS http://127.0.0.1:3000/api/health)
+          echo "  /api/health -> $health"
+          echo "$health" | grep -q '"ok":true'
+          echo "$health" | grep -q '"model":"ci-model"'
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)
+          [ "$code" = "200" ] || { echo "ERROR: frontend not served (HTTP $code)"; exit 1; }
+          echo "  / -> $code"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/nope)
+          [ "$code" = "404" ] || { echo "ERROR: expected 404, got $code"; exit 1; }
+          echo "  /api/nope -> $code"
+
+          # SSE headers must survive the container boundary, and an invalid
+          # payload must produce an error event rather than hanging.
+          headers=$(curl -sS -D - -o /tmp/sse.txt -X POST http://127.0.0.1:3000/api/chat \
+            -H 'Content-Type: application/json' --data '{"messages":[]}' --max-time 10)
+          echo "$headers" | grep -qi 'content-type: text/event-stream'
+          echo "$headers" | grep -qi 'x-accel-buffering: no'
+          grep -q 'event: error' /tmp/sse.txt
+          echo "✓ SSE headers and error event verified through the container"
+
+      - name: Stops cleanly on SIGTERM (exit code 0)
         run: |
-          node -e "
-            const fs = require('fs');
-            const src = fs.readFileSync('server.js', 'utf8');
-            const checks = [
-              ['express.static', 'Express static middleware present'],
-              ['public', 'Public dir path referenced'],
-              ['__dirname', '__dirname used for absolute path'],
-              ['OPENAI_BASE_URL', 'Dahl base URL configurable via env'],
-              ['OPENAI_MODEL', 'Dahl model configurable via env'],
-              ['X-Accel-Buffering', 'SSE buffering disabled'],
-              ['text/event-stream', 'SSE content-type set'],
-            ];
-            checks.forEach(([needle, label]) => {
-              if (!src.includes(needle)) {
-                console.error('MISSING:', label, '(looking for:', needle + ')');
-                process.exit(1);
-              }
-              console.log('✓', label);
-            });
-          "
+          set -euo pipefail
+          docker stop -t 15 chat-smoke >/dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' chat-smoke)
+          docker logs chat-smoke 2>&1 | tail -5
+          [ "$code" = "0" ] || { echo "ERROR: unclean shutdown, exit code $code"; exit 1; }
+          echo "✓ graceful shutdown (exit 0)"
 
-      - name: Simulate Vercel build start command
-        run: node --eval "console.log('Build check passed — npm start would run server.js')"
+      - name: Report image size
+        if: always()
+        run: docker image ls aaron-ai-chat:ci --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
 
-  # ── Job 4: Security audit ─────────────────────────────────
+      - name: Clean up
+        if: always()
+        run: docker rm -f chat-smoke 2>/dev/null || true
+
+  # ── Job 4: security ────────────────────────────────────────
   security:
     name: Security audit
     runs-on: ubuntu-latest
@@ -175,34 +208,32 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
 
-      - name: Audit dependencies for vulnerabilities
-        run: npm audit --audit-level=high 2>&1 | tee /tmp/audit.txt ; ret=${PIPESTATUS[0]} ; if [ $ret -ne 0 ] && grep -q "high\|critical" /tmp/audit.txt; then echo "VULNERABILITIES FOUND"; cat /tmp/audit.txt; exit 1; fi || echo "✓ No high/critical vulnerabilities found"
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
-      - name: Confirm .env is gitignored
+      - name: Secrets are ignored by git and Docker
         run: |
-          if grep -q '^\.env$' .gitignore; then
-            echo "✓ .env is in .gitignore"
-          else
-            echo "ERROR: .env is NOT in .gitignore"
+          set -euo pipefail
+          grep -qx '\.env' .gitignore     || { echo "ERROR: .env not in .gitignore"; exit 1; }
+          grep -qx '\.env' .dockerignore  || { echo "ERROR: .env not in .dockerignore"; exit 1; }
+          echo "✓ .env excluded from git and from the build context"
+
+      - name: No server-only env vars referenced in public/
+        run: |
+          if grep -rE 'OPENAI_API_KEY|process\.env\.OPENAI' public/ 2>/dev/null; then
+            echo "ERROR: server-side env referenced in public/"
             exit 1
           fi
+          echo "✓ no server-only env vars in public/"
 
-      - name: Confirm API key never appears in browser-side JS
+      - name: No hardcoded credentials
         run: |
-          if grep -r 'OPENAI_API_KEY\|process\.env\.OPENAI' public/ 2>/dev/null; then
-            echo "ERROR: API key or server-side env referenced in public/"
+          set -euo pipefail
+          if grep -rE 'sk-[a-zA-Z0-9]{20,}' . --include='*.js' --include='*.html' \
+               --include='*.css' --exclude-dir=node_modules 2>/dev/null; then
+            echo "ERROR: possible hardcoded API key above"
             exit 1
           fi
-          echo "✓ No server-only env vars leaked into public/"
-
-      - name: Confirm no hardcoded credentials
-        run: |
-          set -e
-          count=$(grep -rE 'sk-[a-zA-Z0-9]{20,}' . --include='*.js' --include='*.html' --include='*.css' --exclude-dir=node_modules 2>/dev/null | grep -v '.env$' | wc -l)
-          if [ "$count" -gt 0 ]; then
-            echo "ERROR: Possible hardcoded API keys found:"
-            grep -rE 'sk-[a-zA-Z0-9]{20,}' . --include='*.js' --include='*.html' --include='*.css' --exclude-dir=node_modules
-            exit 1
-          fi
-          echo "✓ No hardcoded credentials found"
+          echo "✓ no hardcoded credentials"
