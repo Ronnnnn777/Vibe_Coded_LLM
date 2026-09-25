@@ -7,10 +7,14 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
+    "test:unit": "node --test tests/config.test.js",
+    "test:integration": "node --test tests/integration.test.js",
     "test:watch": "node --test --watch",
-    "lint": "eslint server.js public/app.js",
-    "lint:fix": "eslint --fix server.js public/app.js",
-    "pre-commit": "npm run lint && npm run test"
+    "lint": "eslint server.js public/app.js tests eslint.config.js --max-warnings=80",
+    "lint:fix": "eslint --fix server.js public/app.js tests eslint.config.js",
+    "docker:build": "docker build -t aaron-ai-chat:local .",
+    "docker:run": "docker run --rm --init -p 3000:3000 --env-file .env aaron-ai-chat:local",
+    "pre-commit": "npm run lint && npm test"
   },
   "keywords": [
     "ai",
@@ -30,8 +34,11 @@
     "helmet": "^7.1.0",
     "openai": "^4.67.3"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "eslint": "9.39.5",
+    "globals": "15.15.0"
+  },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.9.0"
   }
 }
