@@ -115,7 +115,22 @@ npm run dev
 | `npm run test:integration` | runtime tests only |
 | `npm run lint` | ESLint 9 flat config; fails on errors |
 | `npm run lint:fix` | autofix |
+| `npm run check` | `lint && test` — the same gate CI runs |
 | `npm run docker:build` / `docker:run` | build and run the production image |
+
+`check` does **not** run automatically. To make it a real pre-commit gate:
+
+```bash
+printf '#!/bin/sh\nnpm run check\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+(Or wire it with Husky/lefthook if you prefer something committed to the repo.)
+
+**Lint warnings are ratcheted.** `npm run lint` passes `--max-warnings=71`,
+today's exact count — so any *new* warning fails the build, while the
+existing backlog (mostly `no-var` in the pre-existing frontend) does not
+block. Lower the number as you clean up; never raise it.
 
 **Node version:** `>=20.9.0`, enforced by `engine-strict=true` in `.npmrc`.
 Node 18 is EOL and ESLint 9 needs ≥18.18, so the floor is 20.9.0 — and CI
@@ -127,7 +142,10 @@ like `<25` would make `npm ci` hard-fail on Node 25/26, which is what current
 releases are today. Drift is caught by tests instead —
 `tests/config.test.js` fails if `engines.node`, the CI matrix and the
 Dockerfile base image ever disagree (and, if you do add an upper bound, that
-every matrix entry respects it).
+every matrix entry respects it). A separate **non-blocking** weekly workflow
+(`.github/workflows/node-current.yml`) runs the suite on Node `current`, so a
+breaking release shows up as a canary failure rather than a surprise on the
+day you bump the floor.
 
 ---
 
@@ -238,6 +256,14 @@ vercel link
 vercel env add OPENAI_API_KEY      # then OPENAI_BASE_URL, OPENAI_MODEL, APP_URL
 vercel --prod
 ```
+
+`@vercel/node` requires the entrypoint in `vercel.json` (`server.js`) to
+export a **callable** request handler — an object export fails at runtime
+with *"the default export is not a function"*, and `npm start` would not
+reveal it because that path goes through `require.main === module` instead.
+So `module.exports` is the Express app itself, with the named helpers
+(`createApp`, `start`, …) attached as properties. A test asserts the export
+stays callable and that `vercel.json` points at that same file.
 
 Use a container host if streaming reliability matters.
 

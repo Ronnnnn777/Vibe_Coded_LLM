@@ -118,9 +118,15 @@ describe('package.json — single source of truth for commands', () => {
     }
   });
 
-  it('pre-commit chains lint and test', () => {
-    const hook = pkg.scripts?.['pre-commit'] || '';
-    assert.ok(hook.includes('lint') && hook.includes('test'), 'pre-commit should run lint && test');
+  it('exposes a `check` script chaining lint and test', () => {
+    const check = pkg.scripts?.check || '';
+    assert.ok(check.includes('lint') && check.includes('test'), '`check` should run lint && test');
+  });
+
+  it('does not imply a git hook runs automatically', () => {
+    // "pre-commit" reads like it is wired up; it is not, unless the user
+    // installs the hook documented in the README. Renamed to `check`.
+    assert.ok(!pkg.scripts?.['pre-commit'], 'use `check` instead of a misleading `pre-commit` script');
   });
 
   it('ESLint is a real devDependency, not an ad-hoc CI install', () => {
@@ -177,15 +183,21 @@ describe('toolchain versions agree across package.json, Docker and CI', () => {
   it('the Docker base image satisfies the declared engine range', () => {
     const from = /FROM node:(\d+(?:\.\d+)*)/.exec(dockerfile);
     assert.ok(from, 'could not read the Node version from the Dockerfile FROM line');
-    const image = parseVersion(from[1]);
+    const tag = from[1];
+    // 'node:22' means 22.latest, so pad the unspecified parts optimistically.
+    // 'node:20.5' is an explicit pin and must be compared exactly — otherwise
+    // a base older than the engines floor would slip through.
+    const specified = tag.split('.').length;
+    const parsed = parseVersion(tag);
+    const image = specified === 1 ? [parsed[0], 99, 99] : (specified === 2 ? [parsed[0], parsed[1], 99] : parsed);
     assert.ok(
-      cmp([image[0], 99, 99], floor) >= 0,
-      `Dockerfile uses node:${from[1]} but engines.node requires >=${fmt(floor)}`
+      cmp(image, floor) >= 0,
+      `Dockerfile uses node:${tag} but engines.node requires >=${fmt(floor)}`
     );
     if (ceiling) {
       assert.ok(
-        cmp(image, ceiling) < 0,
-        `Dockerfile uses node:${from[1]}, at or above the engines.node ceiling <${fmt(ceiling)}`
+        cmp(parsed, ceiling) < 0,
+        `Dockerfile uses node:${tag}, at or above the engines.node ceiling <${fmt(ceiling)}`
       );
     }
   });

@@ -413,7 +413,60 @@ describe('runtime — public/app.js renders the stream it is sent', () => {
   });
 });
 
-/* ── 5. Process-level behaviour (needs a real child process) ─────────── */
+/* ── 5. Serverless handler contract (@vercel/node) ───────────────────── */
+
+describe('runtime — @vercel/node handler contract', () => {
+  // vercel.json builds server.js with @vercel/node, which requires the
+  // entrypoint and invokes module.exports as (req, res). If the module
+  // exports an object, the deployment fails with "the default export is not
+  // a function" — and `npm start` working locally would not reveal it,
+  // because that path goes through require.main === module instead.
+  const handler = require('../server.js');
+
+  it('module.exports is a callable request handler', () => {
+    assert.strictEqual(
+      typeof handler,
+      'function',
+      '@vercel/node needs the entrypoint to export a function (the Express app), not an object'
+    );
+    assert.ok(handler.length >= 2, 'handler should accept at least (req, res)');
+  });
+
+  it('still exposes the named helpers as properties', () => {
+    for (const key of ['app', 'createApp', 'start', 'readConfig', 'isConfigured']) {
+      assert.ok(handler[key], `named export "${key}" missing`);
+    }
+    assert.strictEqual(handler.app, handler, 'handler and .app should be the same Express instance');
+  });
+
+  it('serves requests when an external server wraps it (what the Vercel bridge does)', async () => {
+    const server = http.createServer(handler);
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const health = await fetch(`${base}/api/health`);
+      assert.strictEqual(health.status, 200, 'wrapped handler did not serve /api/health');
+      assert.strictEqual((await health.json()).ok, true);
+
+      const index = await fetch(`${base}/`);
+      assert.strictEqual(index.status, 200, 'wrapped handler did not serve the static frontend');
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('vercel.json points at the file that exports the handler', () => {
+    const vercel = JSON.parse(fs.readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'));
+    const entry = vercel.builds?.find((b) => b.use === '@vercel/node')?.src;
+    assert.ok(entry, 'no @vercel/node build entry in vercel.json');
+    const resolved = path.join(ROOT, entry);
+    assert.strictEqual(resolved, SERVER_PATH, `vercel.json builds "${entry}", expected server.js`);
+    assert.strictEqual(typeof require(resolved), 'function', `${entry} must export a function`);
+  });
+});
+
+/* ── 6. Process-level behaviour (needs a real child process) ─────────── */
 
 describe('process — CLI startup and shutdown', () => {
   /** Spawn `node server.js` and wait until it answers /api/health. */

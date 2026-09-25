@@ -1,0 +1,56 @@
+# Early-warning canary for upcoming Node releases.
+#
+# Deliberately NON-BLOCKING: it never gates a PR. Its job is to tell you that
+# the next Node major broke something *before* you bump engines.node or the
+# Dockerfile base image — so "new Node release day" is a heads-up, not an
+# outage. The blocking matrix lives in ci.yml (20.9.0 / 22 / 24).
+name: Node canary
+
+on:
+  schedule:
+    # Mondays 06:00 UTC (14:00 Asia/Manila)
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Test (Node ${{ matrix.node-version }}, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 'current' tracks the newest release; '24' is the newest version the
+        # blocking matrix covers, kept here as a control so a canary failure
+        # is obviously attributable to the newer runtime.
+        node-version: ['current', '24']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Report runtime
+        run: |
+          echo "node $(node -v) / npm $(npm -v)"
+          echo "engines.node: $(node -p "require('./package.json').engines.node")"
+
+      # engine-strict=true would reject a runtime outside engines.node before
+      # we ever get to run the tests, which is exactly what this job is meant
+      # to look past — so the check is disabled here only.
+      - name: Install (engine-strict relaxed for the canary)
+        run: npm ci --engine-strict=false
+
+      - name: Run tests
+        run: npm test
+
+      - name: Lint
+        run: npm run lint

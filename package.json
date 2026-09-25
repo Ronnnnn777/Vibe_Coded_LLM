@@ -10,11 +10,11 @@
     "test:unit": "node --test tests/config.test.js",
     "test:integration": "node --test tests/integration.test.js",
     "test:watch": "node --test --watch",
-    "lint": "eslint server.js public/app.js tests eslint.config.js --max-warnings=80",
+    "lint": "eslint server.js public/app.js tests eslint.config.js --max-warnings=71",
     "lint:fix": "eslint --fix server.js public/app.js tests eslint.config.js",
     "docker:build": "docker build -t aaron-ai-chat:local .",
     "docker:run": "docker run --rm --init -p 3000:3000 --env-file .env aaron-ai-chat:local",
-    "pre-commit": "npm run lint && npm test"
+    "check": "npm run lint && npm test"
   },
   "keywords": [
     "ai",

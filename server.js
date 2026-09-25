@@ -28,6 +28,7 @@
  * ---------------------------------------------------------- */
 const path = require('node:path');
 const http = require('node:http');
+const crypto = require('node:crypto');
 
 const express = require('express');
 const helmet = require('helmet');
@@ -129,10 +130,19 @@ function createApp(overrides = {}) {
   });
 
   // ── Optional shared-secret authentication middleware ─────────────────────
+  // Comparison is constant-time. Both sides are hashed first so that
+  // timingSafeEqual receives equal-length buffers (it throws otherwise) and
+  // so the length of the real secret does not leak through timing either.
+  function secretsMatch(provided, expected) {
+    if (typeof provided !== 'string') return false;
+    const a = crypto.createHash('sha256').update(provided).digest();
+    const b = crypto.createHash('sha256').update(expected).digest();
+    return crypto.timingSafeEqual(a, b);
+  }
+
   function requireSharedSecret(req, res, next) {
     if (!cfg.sharedSecret) return next(); // auth disabled if no secret configured
-    const provided = req.headers['x-shared-secret'];
-    if (provided === cfg.sharedSecret) return next();
+    if (secretsMatch(req.headers['x-shared-secret'], cfg.sharedSecret)) return next();
     return res.status(401).json({ error: 'Unauthorized: missing or invalid x-shared-secret header.' });
   }
 
@@ -476,9 +486,27 @@ function start({ port = PORT, host = HOST, expressApp = app } = {}) {
   return server;
 }
 
-module.exports = { app, createApp, readConfig, isConfigured, start, PORT, HOST };
+/* ---------------------------------------------------------- *
+ *  Exports
+ * ---------------------------------------------------------- *
+ *  module.exports MUST be the callable Express app, not an object:
+ *  @vercel/node requires the entrypoint (see vercel.json `builds.src`)
+ *  to export a request handler and fails with "the default export is not
+ *  a function" otherwise. The named helpers are attached as properties so
+ *  `const { createApp } = require('./server.js')` keeps working.
+ * ---------------------------------------------------------- */
+module.exports = app;
+module.exports.app = app;
+module.exports.createApp = createApp;
+module.exports.readConfig = readConfig;
+module.exports.isConfigured = isConfigured;
+module.exports.start = start;
+module.exports.PORT = PORT;
+module.exports.HOST = HOST;
 
 // Only listen when executed directly (`node server.js`), never on require().
+// On Vercel the file is required by the runtime bridge, so this stays false
+// and the exported handler above is what serves requests.
 if (require.main === module) {
   start();
 }
