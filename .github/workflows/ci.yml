@@ -20,14 +20,16 @@ jobs:
     name: Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
 
-    # Node 18 is EOL (Apr 2025) and ESLint 9 requires >=18.18, so the
-    # engines floor is 20.9. engine-strict=true turns an unsupported version
-    # into a hard `npm ci` failure, so the matrix floor and engines.node must
-    # stay in sync — tests/config.test.js asserts exactly that.
+    # '20.9.0' is the exact floor declared in engines.node — pinned rather
+    # than '20' so CI proves the lower bound itself, not just 20.latest.
+    # Node 18 is EOL (Apr 2025) and ESLint 9 requires >=18.18, hence 20.9.
+    # engine-strict=true turns an unsupported version into a hard `npm ci`
+    # failure, so the matrix floor and engines.node must stay in sync —
+    # tests/config.test.js asserts exactly that.
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20', '22', '24']
+        node-version: ['20.9.0', '22', '24']
 
     steps:
       - name: Checkout

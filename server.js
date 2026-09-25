@@ -196,6 +196,22 @@ function createApp(overrides = {}) {
   /* ---------------------------------------------------------- *
    *  POST /api/chat — SSE streaming endpoint
    * ---------------------------------------------------------- *
+   *  Middleware order is deliberate:
+   *
+   *    1. chatLimiter        — rate limit FIRST, including requests that
+   *                            fail auth. SHARED_SECRET is the only thing
+   *                            between the internet and your API credits,
+   *                            so guesses must be throttled; putting the
+   *                            secret check first would leave it open to
+   *                            unlimited brute force. The cost is that
+   *                            rejected requests consume that IP's own
+   *                            quota, which is the intended outcome for an
+   *                            attacker and irrelevant for a real user.
+   *    2. requireSharedSecret — reject unauthenticated callers.
+   *    3. configured?        — 503 before any upstream client is built, so
+   *                            a misconfigured server spends nothing.
+   *    4. stream             — only now do we talk to the provider.
+   *
    *  SSE headers (in order):
    *    Content-Type      → text/event-stream; charset=utf-8
    *    Cache-Control     → no-cache, no-transform  (defeats CDN caching)

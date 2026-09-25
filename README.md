@@ -55,7 +55,7 @@ shared secret still apply, and an unconfigured server serves no tokens.
 ├── eslint.config.js    ← ESLint 9 flat config
 ├── package.json
 ├── server.js           ← Express + OpenAI SDK + SSE streaming backend
-├── vercel.json         ← legacy Vercel config (see Deployment)
+├── vercel.json         ← Vercel config, best-effort target (see Deployment)
 ├── public/
 │   ├── index.html      ← SPA shell + CDN library imports
 │   ├── style.css       ← responsive dark theme
@@ -71,7 +71,7 @@ shared secret still apply, and an unconfigured server serves no tokens.
 
 ### Prerequisites
 
-- **Node.js** ≥ 18.0.0
+- **Node.js** ≥ 20.9.0 (enforced; see *Command reference*)
 - A valid API key from your Dahl Inference provider
 
 ### Steps
@@ -118,9 +118,16 @@ npm run dev
 | `npm run docker:build` / `docker:run` | build and run the production image |
 
 **Node version:** `>=20.9.0`, enforced by `engine-strict=true` in `.npmrc`.
-Node 18 is EOL and ESLint 9 needs ≥18.18, so the floor is set to the lowest
-version CI actually tests (20, 22, 24). `tests/config.test.js` fails if
-`engines.node`, the CI matrix and the Dockerfile base image ever disagree.
+Node 18 is EOL and ESLint 9 needs ≥18.18, so the floor is 20.9.0 — and CI
+pins that exact version as its lowest matrix entry (`20.9.0`, `22`, `24`) so
+the declared bound is the bound actually tested.
+
+There is deliberately **no upper bound**: with `engine-strict=true`, a cap
+like `<25` would make `npm ci` hard-fail on Node 25/26, which is what current
+releases are today. Drift is caught by tests instead —
+`tests/config.test.js` fails if `engines.node`, the CI matrix and the
+Dockerfile base image ever disagree (and, if you do add an upper bound, that
+every matrix entry respects it).
 
 ---
 
@@ -141,8 +148,11 @@ docker compose up --build
 Details worth knowing:
 
 - **Non-root.** The runtime stage drops to the built-in `node` user.
-- **Healthcheck built in.** Docker polls `/api/health`; orchestrators and
-  load balancers should point at the same endpoint.
+- **Healthcheck built in.** Docker polls `/api/health` (liveness) — chosen so
+  a running-but-unconfigured container reports healthy instead of restart-
+  looping before you can read its logs. Point the **platform's** deploy gate
+  at `/api/ready` so a release missing credentials fails. CI asserts both
+  halves of this contract.
 - **`HOST=0.0.0.0` by default.** Binding `127.0.0.1` inside a container makes
   the app unreachable from outside it — the most common "works locally,
   dead in prod" failure for this kind of app.

@@ -295,6 +295,43 @@ describe('runtime — security', () => {
     }
   });
 
+  it('rate limits before the secret check, so the secret cannot be brute forced', async () => {
+    // Deliberate ordering (see the comment above app.post('/api/chat')):
+    // the limiter runs FIRST, so failed authentication attempts are throttled
+    // rather than being free to repeat forever.
+    const calls = [];
+    const stub = await startStubUpstream(calls);
+    const instance = await listen(createApp({
+      apiKey: 'sk-test-key',
+      baseURL: stub.baseURL,
+      sharedSecret: 's3cret'
+    }));
+    try {
+      const statuses = [];
+      for (let i = 0; i < 25; i++) {
+        const res = await fetch(`${instance.base}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-shared-secret': 'guess' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] })
+        });
+        statuses.push(res.status);
+        await res.text(); // drain
+      }
+
+      assert.ok(statuses.includes(401), 'a wrong secret must be rejected');
+      const firstThrottled = statuses.indexOf(429);
+      assert.notStrictEqual(firstThrottled, -1, 'repeated wrong-secret attempts were never throttled');
+      assert.ok(
+        firstThrottled <= 20,
+        `throttling started at attempt ${firstThrottled + 1}; the limiter should cap the window at 20`
+      );
+      assert.strictEqual(calls.length, 0, 'no upstream spend during a brute-force attempt');
+    } finally {
+      await instance.close();
+      await stub.close();
+    }
+  });
+
   it('never exposes the API key to the browser', async () => {
     const stub = await startStubUpstream([]);
     const instance = await listen(createApp({ apiKey: 'sk-super-secret-value', baseURL: stub.baseURL }));

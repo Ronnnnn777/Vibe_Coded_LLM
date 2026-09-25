@@ -40,7 +40,11 @@ USER node
 
 EXPOSE 3000
 
-# Uses the same endpoint the platform load balancer should poll.
+# LIVENESS, deliberately — /api/health is always 200 while the process is up.
+# Not /api/ready: readiness is 503 without credentials, which would mark a
+# running-but-unconfigured container unhealthy and make the platform restart
+# it in a loop instead of letting you read the logs. Point the PLATFORM's
+# deploy gate at /api/ready (see README → Health vs readiness).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 

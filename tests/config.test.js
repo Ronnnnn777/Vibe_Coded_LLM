@@ -21,10 +21,33 @@ const ROOT = path.resolve(__dirname, '..');
 const read = (...p) => fs.readFileSync(path.join(ROOT, ...p), 'utf8');
 const lines = (s) => s.split('\n').map((l) => l.trim());
 
-/** Lowest major version accepted by a simple `>=x.y.z` range. */
-function minMajor(range) {
-  const m = /(\d+)/.exec(String(range));
-  return m ? Number(m[1]) : NaN;
+/** '20.9.0' | '20' | 'v20.9' -> [20, 9, 0] */
+function parseVersion(v) {
+  const parts = String(v).trim().replace(/^v/, '').split('.').map(Number);
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+/** Numeric semver compare: <0, 0, >0. */
+function cmp(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+const fmt = (v) => v.join('.');
+
+/** Lower bound of a range like '>=20.9.0' (optionally '>=20.9.0 <25'). */
+function rangeFloor(range) {
+  const m = /(\d+(?:\.\d+)*)/.exec(String(range));
+  assert.ok(m, `unparseable engines.node: ${range}`);
+  return parseVersion(m[1]);
+}
+
+/** Upper bound of a range like '>=20.9.0 <25', or null when unbounded. */
+function rangeCeiling(range) {
+  const m = /<\s*(\d+(?:\.\d+)*)/.exec(String(range));
+  return m ? parseVersion(m[1]) : null;
 }
 
 describe('.env.example — documents every setting the server reads', () => {
@@ -106,44 +129,78 @@ describe('package.json — single source of truth for commands', () => {
 
   it('declares an explicit Node engine range', () => {
     assert.ok(pkg.engines?.node, 'engines.node missing');
-    assert.ok(Number.isFinite(minMajor(pkg.engines.node)), `unparseable engines.node: ${pkg.engines.node}`);
+    assert.ok(rangeFloor(pkg.engines.node).some((n) => n > 0), `unparseable engines.node: ${pkg.engines.node}`);
   });
 });
 
 describe('toolchain versions agree across package.json, Docker and CI', () => {
   const pkg = JSON.parse(read('package.json'));
-  const engineMin = minMajor(pkg.engines.node);
+  const floor = rangeFloor(pkg.engines.node);
+  const ceiling = rangeCeiling(pkg.engines.node);
   const ci = read(path.join('.github', 'workflows', 'ci.yml'));
   const dockerfile = read('Dockerfile');
 
-  it('the CI matrix only tests versions the package claims to support', () => {
-    const matrix = /node-version:\s*\[([^\]]+)\]/.exec(ci);
-    assert.ok(matrix, 'could not find the node-version matrix in ci.yml');
-    const versions = matrix[1].split(',').map((v) => Number(v.replace(/['"\s]/g, '')));
-    assert.ok(versions.length > 0, 'empty CI matrix');
-    for (const v of versions) {
-      assert.ok(v >= engineMin, `CI tests Node ${v}, below the declared engines.node (>=${engineMin})`);
+  const matrix = (() => {
+    const m = /node-version:\s*\[([^\]]+)\]/.exec(ci);
+    assert.ok(m, 'could not find the node-version matrix in ci.yml');
+    return m[1].split(',').map((v) => parseVersion(v.replace(/['"\s]/g, '')));
+  })();
+
+  it('every CI matrix entry satisfies engines.node', () => {
+    assert.ok(matrix.length > 0, 'empty CI matrix');
+    for (const v of matrix) {
+      assert.ok(
+        cmp(v, floor) >= 0,
+        `CI tests Node ${fmt(v)}, below the declared engines.node floor ${fmt(floor)}`
+      );
+      if (ceiling) {
+        assert.ok(
+          cmp(v, ceiling) < 0,
+          `CI tests Node ${fmt(v)}, at or above the engines.node ceiling <${fmt(ceiling)}`
+        );
+      }
     }
-    // engine-strict=true makes an unsupported version a hard install failure,
-    // so the floor must be a version CI actually proves.
+  });
+
+  it('the lowest CI matrix entry IS the declared floor (engine-strict drift guard)', () => {
+    // engine-strict=true makes an unsupported version a hard `npm ci`
+    // failure, so the floor must be a version CI actually exercises —
+    // '20' (meaning 20.latest) would not prove '>=20.9.0'.
+    const lowest = matrix.reduce((a, b) => (cmp(a, b) <= 0 ? a : b));
     assert.strictEqual(
-      Math.min(...versions),
-      engineMin,
-      `engines.node claims >=${engineMin} but the lowest version CI tests is ${Math.min(...versions)}`
+      fmt(lowest),
+      fmt(floor),
+      `engines.node declares >=${fmt(floor)} but the lowest version CI pins is ${fmt(lowest)}`
     );
   });
 
   it('the Docker base image satisfies the declared engine range', () => {
-    const from = /FROM node:(\d+)/.exec(dockerfile);
-    assert.ok(from, 'could not read the Node major from the Dockerfile FROM line');
+    const from = /FROM node:(\d+(?:\.\d+)*)/.exec(dockerfile);
+    assert.ok(from, 'could not read the Node version from the Dockerfile FROM line');
+    const image = parseVersion(from[1]);
     assert.ok(
-      Number(from[1]) >= engineMin,
-      `Dockerfile uses node:${from[1]} but engines.node requires >=${engineMin}`
+      cmp([image[0], 99, 99], floor) >= 0,
+      `Dockerfile uses node:${from[1]} but engines.node requires >=${fmt(floor)}`
     );
+    if (ceiling) {
+      assert.ok(
+        cmp(image, ceiling) < 0,
+        `Dockerfile uses node:${from[1]}, at or above the engines.node ceiling <${fmt(ceiling)}`
+      );
+    }
   });
 
   it('the production image installs without dev dependencies', () => {
     assert.match(dockerfile, /npm ci[^\n]*--omit=dev/, 'Docker build should use `npm ci --omit=dev`');
+  });
+
+  it('the container HEALTHCHECK targets liveness, not readiness', () => {
+    // /api/ready is 503 without credentials; using it here would restart-loop
+    // a running-but-unconfigured container. Deploy gates use /api/ready.
+    const hc = /HEALTHCHECK[\s\S]*?CMD([\s\S]*?)\n(?:[A-Z]|$)/.exec(dockerfile);
+    assert.ok(hc, 'no HEALTHCHECK in the Dockerfile');
+    assert.match(hc[1], /\/api\/health/, 'HEALTHCHECK should poll /api/health');
+    assert.ok(!/\/api\/ready/.test(hc[1]), 'HEALTHCHECK must not poll /api/ready — see README');
   });
 
   it('.npmrc does not force omit=dev on every install', () => {
