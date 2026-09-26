@@ -273,15 +273,21 @@ describe('vercel.json — kept working as a best-effort target', () => {
   it('serves every file in public/ from the CDN, not the function', () => {
     // Previously the catch-all sent index.html, style.css and app.js through
     // the lambda: a function invocation (and possible cold start) per asset,
-    // on every page load.
-    const files = fs.readdirSync(path.join(ROOT, 'public'));
+    // on every page load. Walk recursively — a nested asset such as
+    // public/assets/logo.png must be covered too.
+    const walk = (dir, prefix = '') => fs.readdirSync(dir, { withFileTypes: true })
+      .flatMap((entry) => (entry.isDirectory()
+        ? walk(path.join(dir, entry.name), `${prefix}${entry.name}/`)
+        : [`${prefix}${entry.name}`]));
+
+    const files = walk(path.join(ROOT, 'public'));
     assert.ok(files.length > 0, 'public/ is empty?');
     for (const file of files) {
       const { dest } = resolve(`/${file}`);
       assert.strictEqual(
         dest,
         `/public/${file}`,
-        `/${file} should resolve to the static build, got ${dest} — add its extension to the asset route`
+        `/${file} should resolve to the static build, got ${dest} — add its extension to the asset route in vercel.json`
       );
     }
   });
@@ -291,10 +297,30 @@ describe('vercel.json — kept working as a best-effort target', () => {
     assert.ok(!servedByLambda('/'), 'the landing page should not cost a function invocation');
   });
 
-  it('falls back to the function for unknown paths', () => {
-    for (const p of ['/some/deep/path', '/whatever']) {
-      assert.ok(servedByLambda(p), `${p} should fall through to server.js`);
+  it('answers unknown paths with a static 404, not a paid invocation', () => {
+    // public/app.js has no client-side routing, so an SPA rewrite would be
+    // wrong and a lambda fallback would just bill for bot traffic.
+    for (const p of ['/some/deep/path', '/whatever', '/wp-login.php']) {
+      const { dest, route } = resolve(p);
+      assert.ok(!servedByLambda(p), `${p} should not reach the function`);
+      assert.strictEqual(dest, '/public/404.html', `${p} should serve the static 404 page`);
+      assert.strictEqual(route.status, 404, `${p} should return HTTP 404, not 200`);
     }
+  });
+
+  it('the function is reachable only for /api/*', () => {
+    // This is why the node build no longer needs includeFiles: "public/**".
+    // If a non-API path is ever routed back to the function, re-add it or
+    // express.static will have nothing to serve.
+    const lambdaRoutes = vercel.routes.filter((r) => r.dest === '/server.js');
+    for (const r of lambdaRoutes) {
+      assert.match(r.src, /^\/api\//, `route "${r.src}" sends non-API traffic to the function`);
+    }
+    const node = vercel.builds.find((b) => b.use === '@vercel/node');
+    assert.ok(
+      !node.config?.includeFiles,
+      'includeFiles is dead weight while the function only serves /api/* — it inflates the bundle and slows cold starts'
+    );
   });
 });
 

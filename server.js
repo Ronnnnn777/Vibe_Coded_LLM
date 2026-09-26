@@ -411,6 +411,12 @@ function createApp(overrides = {}) {
     res.status(404).json({ error: 'Not found' });
   });
 
+  // Unknown non-API paths. Mirrors the static 404 that vercel.json serves
+  // from the CDN, so local, Docker and serverless all return the same page.
+  app.use((_req, res) => {
+    res.status(404).sendFile(path.join(__dirname, 'public', '404.html'));
+  });
+
   return app;
 }
 

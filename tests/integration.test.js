@@ -169,6 +169,17 @@ describe('runtime — boot, health and static frontend', () => {
     assert.strictEqual(res.status, 404);
     assert.deepStrictEqual(await res.json(), { error: 'Not found' });
   });
+
+  it('GET /unknown serves the same 404 page the CDN serves', async () => {
+    // Parity with the static 404 in vercel.json, so local, Docker and
+    // serverless behave identically for unknown non-API paths.
+    const res = await fetch(`${configured.base}/no/such/page`);
+    assert.strictEqual(res.status, 404);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    const html = await res.text();
+    assert.match(html, /404/);
+    assert.match(html, /Back to chat/, 'should serve public/404.html');
+  });
 });
 
 /* ── 2. The SSE contract the browser depends on ──────────────────────── */

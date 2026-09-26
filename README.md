@@ -258,12 +258,20 @@ vercel --prod
 ```
 
 **Routing.** `public/**` is built as static output and served from the CDN;
-only `/api/*` and unmatched paths reach the function. Before this, the
-catch-all sent `index.html`, `style.css` and `app.js` through the lambda —
-a function invocation, and a possible cold start, for every asset on every
-page load. The node build keeps `includeFiles: "public/**"` so the fallback
-route can still serve the UI. `tests/config.test.js` replays the route table
-and fails if any file in `public/` starts resolving to the function again.
+**only `/api/*` reaches the function.** Before this, the catch-all sent
+`index.html`, `style.css` and `app.js` through the lambda — a function
+invocation, and a possible cold start, for every asset on every page load.
+Unknown paths now return a static `404.html` from the CDN rather than
+billing an invocation for every bot probing `/wp-login.php`; there is no
+client-side routing in `public/app.js`, so an SPA rewrite would be wrong.
+Because the function no longer serves static files, the node build carries
+no `includeFiles` — a smaller bundle means faster cold starts, which is what
+time-to-first-token depends on.
+
+`tests/config.test.js` replays the route table and fails if any file in
+`public/` (walked recursively) stops resolving to static output, if a
+non-API path is routed back to the function, or if SSE/no-store headers ever
+leak onto static assets.
 
 **Verify before trusting it.** Nothing local exercises the serverless path —
 `npm start` and Docker both go through `require.main === module`. Run
